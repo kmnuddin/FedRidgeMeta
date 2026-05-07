@@ -15,6 +15,7 @@ class RFWrapper:
         )
         self.calibrator = None
         self._use_calib = calibrate
+        self.all_classes = None  # set externally to the full class list
 
     def fit(self, Z, y):
         self._clf.fit(Z, y)
@@ -25,7 +26,27 @@ class RFWrapper:
             except Exception:
                 self.calibrator = None
 
+    def _pad_proba(self, P):
+        """Pad predict_proba output to cover all_classes if the RF was
+        trained on a subset (common under extreme non-IID).
+        
+        The forest's classes_ are the original string labels in sorted order.
+        If the RF only saw a subset, we map by matching strings."""
+        if self.all_classes is None:
+            return P
+        seen = list(self._clf.classes_)
+        if len(seen) == len(self.all_classes):
+            return P
+        full = np.zeros((P.shape[0], len(self.all_classes)), dtype=P.dtype)
+        for i, c in enumerate(seen):
+            if c in self.all_classes:
+                j = self.all_classes.index(c)
+                full[:, j] = P[:, i]
+        return full
+
     def predict_proba(self, Z):
         if self.calibrator is not None:
-            return self.calibrator.predict_proba(Z)
-        return self._clf.predict_proba(Z)
+            P = self.calibrator.predict_proba(Z)
+        else:
+            P = self._clf.predict_proba(Z)
+        return self._pad_proba(P)

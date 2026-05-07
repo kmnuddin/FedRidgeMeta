@@ -2,7 +2,7 @@
 import os
 import numpy as np
 import pandas as pd
-from typing import Dict
+from typing import Dict, Tuple, Optional
 from collections import defaultdict
 
 def _load_vec_from_path(p):
@@ -10,27 +10,22 @@ def _load_vec_from_path(p):
     ext = os.path.splitext(p)[1].lower()
 
     if ext == ".npy":
-        # DO NOT use mmap_mode here — load into RAM then free the FD
         arr = np.load(p, allow_pickle=False)
         arr = np.asarray(arr, dtype=np.float32)
 
     elif ext == ".npz":
-        # Use a context manager so the file handle is closed immediately
         with np.load(p, allow_pickle=False) as npz:
-            # choose a key deterministically
             for k in ("emb", "embedding", "arr_0"):
                 if k in npz:
                     arr = npz[k]
                     break
             else:
-                # fallback to first key
                 k0 = list(npz.keys())[0]
                 arr = npz[k0]
             arr = np.asarray(arr, dtype=np.float32)
 
     elif ext in (".pt", ".pth"):
         import torch
-        # If your .pt is big, open via file handle to ensure closure
         with open(p, "rb") as f:
             t = torch.load(f, map_location="cpu")
         if hasattr(t, "detach"):
@@ -47,7 +42,6 @@ def _load_vec_from_path(p):
             arr = np.asarray(t, dtype=np.float32)
 
     else:
-        # last-resort: parse string of numbers
         s = p
         if "," in s and " " not in s:
             arr = np.fromstring(s, sep=",", dtype=np.float32)
@@ -130,3 +124,61 @@ def load_clients_from_csvs(csv_map: Dict[str,str],
             idx_by_axial=idx_by_axial
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+#  NEW: Stratified holdout split for Experiment 1
+# ---------------------------------------------------------------------------
+
+def split_holdout(pool: dict,
+                  test_frac: float = 0.30,
+                  seed: int = 42) -> Tuple[list, list]:
+    """
+    Stratified split of a client pool's *originals* into train-pool and
+    fixed-test indices.
+
+    Parameters
+    ----------
+    pool : dict
+        One entry from load_clients_from_csvs (must have 'originals', 'label').
+    test_frac : float
+        Fraction of originals to hold out as the fixed test set (default 0.30).
+    seed : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    pool_originals : list[int]
+        Indices of originals available for AL (training pool).
+    test_originals : list[int]
+        Indices of originals reserved for fixed-test evaluation.
+
+    Notes
+    -----
+    The split is stratified by label.  If a class has only 1 sample it goes
+    to the training pool (cannot split).  Augmentations are NOT split — they
+    follow their parent original via augs_by_axial at usage time.
+    """
+    rng = np.random.RandomState(seed)
+    originals = sorted(pool["originals"])
+    labels = pool["label"]
+
+    # group originals by class
+    cls_to_idx: Dict[str, list] = defaultdict(list)
+    for idx in originals:
+        cls_to_idx[labels[idx]].append(idx)
+
+    pool_originals = []
+    test_originals = []
+
+    for cls, idxs in cls_to_idx.items():
+        rng.shuffle(idxs)
+        n_test = max(1, int(round(len(idxs) * test_frac)))
+        # If only 1 sample available, keep it in pool (cannot test with 0 train)
+        if len(idxs) <= 1:
+            pool_originals.extend(idxs)
+            continue
+        test_originals.extend(idxs[:n_test])
+        pool_originals.extend(idxs[n_test:])
+
+    return sorted(pool_originals), sorted(test_originals)
